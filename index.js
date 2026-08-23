@@ -18,7 +18,7 @@ const HOST = process.env.MC_HOST
 const PORT = Number(process.env.MC_PORT || 25565)
 
 const OWNER = 'nicolas7878'
-const BOT_USERNAME = 'BotTroll'
+const BOT_USERNAME = 'botpromax'
 
 const PERMISSIONS_FILE = './permissions.json'
 
