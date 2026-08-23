@@ -10,6 +10,21 @@ const {
 
 const { GoalNear } = goals
 
+const http = require('http')
+
+const WEB_PORT = Number(process.env.PORT || 3000)
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/plain'
+  })
+
+  res.end('Minecraft bot online')
+})
+
+server.listen(WEB_PORT, '0.0.0.0', () => {
+  console.log(`🌐 Web server escuchando en puerto ${WEB_PORT}`)
+})
 // =====================================================
 // CONFIGURACIÓN
 // =====================================================
