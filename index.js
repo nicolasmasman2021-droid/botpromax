@@ -31,6 +31,7 @@ server.listen(WEB_PORT, '0.0.0.0', () => {
 
 const HOST = process.env.MC_HOST
 const PORT = Number(process.env.MC_PORT || 25565)
+const BOT_PASSWORD = process.env.BOT_PASSWORD
 
 const OWNER = 'nicolas7878'
 const BOT_USERNAME = 'botpromax'
@@ -417,7 +418,38 @@ function createBot() {
     username: BOT_USERNAME,
     auth: 'offline'
   })
+const BOT_PASSWORD = process.env.BOT_PASSWORD
 
+// ...
+
+bot.on('messagestr', (message) => {
+  const msg = message.toLowerCase()
+
+  if (
+    BOT_PASSWORD &&
+    (
+      msg.includes('/login') ||
+      msg.includes('please login') ||
+      msg.includes('inicia sesión') ||
+      msg.includes('inicie sesión') ||
+      msg.includes('contraseña')
+    )
+  ) {
+    console.log('🔐 Servidor solicita autenticación.')
+
+    setTimeout(() => {
+      try {
+        bot.chat(`/login ${BOT_PASSWORD}`)
+        console.log('🔐 Comando de login enviado.')
+      } catch (error) {
+        console.log(
+          '❌ Error enviando login:',
+          error.message
+        )
+      }
+    }, 1500)
+  }
+})
   bot.loadPlugin(pathfinder)
 
   // ===================================================
