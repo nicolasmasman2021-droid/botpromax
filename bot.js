@@ -21,7 +21,7 @@ const CONFIG = {
   host: process.env.MC_HOST || 'trolos1.aternos.me',
   port: Number(process.env.MC_PORT || 25565),
   username: process.env.BOT_USERNAME || 'botpromax',
-  pluginPassword: process.env.BOT_PASSWORD || '123456',
+  pluginPassword: process.env.BOT_PASSWORD || '',
   owner: (process.env.OWNER || 'nicolas7878').toLowerCase(),
   reconnectMs: Number(process.env.RECONNECT_MS || 10000)
 }
