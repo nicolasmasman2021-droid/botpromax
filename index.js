@@ -1,1231 +1,479 @@
 'use strict'
 
-const fs = require('fs')
 const mineflayer = require('mineflayer')
 const {
   pathfinder,
   Movements,
-  goals
+  goals: { GoalNear }
 } = require('mineflayer-pathfinder')
 
-const { GoalNear } = goals
-
-const http = require('http')
-
-const WEB_PORT = Number(process.env.PORT || 3000)
-
-const server = http.createServer((req, res) => {
-  res.writeHead(200, {
-    'Content-Type': 'text/plain'
-  })
-
-  res.end('Minecraft bot online')
-})
-
-server.listen(WEB_PORT, '0.0.0.0', () => {
-  console.log(`🌐 Web server escuchando en puerto ${WEB_PORT}`)
-})
-// =====================================================
-// CONFIGURACIÓN
-// =====================================================
-
-const HOST = process.env.MC_HOST
-const PORT = Number(process.env.MC_PORT || 25565)
-const BOT_PASSWORD = process.env.BOT_PASSWORD
-
-const OWNER = 'nicolas7878'
-const BOT_USERNAME = 'botpromax'
-
-const PERMISSIONS_FILE = './permissions.json'
-
-const COMMAND_COOLDOWN = 700
+// Configuración: puedes cambiar estos valores desde variables de entorno.
+const CONFIG = {
+  host: process.env.MC_HOST || 'trolos1.aternos.me',
+  port: Number(process.env.MC_PORT || 25565),
+  username: process.env.BOT_USERNAME || 'botpromax',
+  pluginPassword: process.env.BOT_PASSWORD || '',
+  owner: (process.env.OWNER || 'nicolas7878').toLowerCase(),
+  reconnectMs: Number(process.env.RECONNECT_MS || 10000)
+}
 
 let bot = null
 let movements = null
 let reconnectTimer = null
-let manualStop = false
-let lastCommandTime = 0
+let loginSent = false
+let taskId = 0
+let mode = 'quieto'
 
-// =====================================================
-// PERMISOS
-// =====================================================
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
-let allowedUsers = new Map()
-
-function loadPermissions() {
-  try {
-    if (!fs.existsSync(PERMISSIONS_FILE)) {
-      allowedUsers = new Map()
-      allowedUsers.set(OWNER.toLowerCase(), OWNER)
-      savePermissions()
-      return
-    }
-
-    const data = fs.readFileSync(
-      PERMISSIONS_FILE,
-      'utf8'
-    )
-
-    const names = JSON.parse(data)
-
-    allowedUsers = new Map()
-
-    if (Array.isArray(names)) {
-      for (const name of names) {
-        if (typeof name === 'string' && name.trim()) {
-          allowedUsers.set(
-            name.toLowerCase(),
-            name
-          )
-        }
-      }
-    }
-
-    // Nico siempre conserva los permisos.
-    allowedUsers.set(
-      OWNER.toLowerCase(),
-      OWNER
-    )
-
-    console.log(
-      `🔐 Permisos cargados: ${allowedUsers.size}`
-    )
-
-  } catch (error) {
-    console.log(
-      '⚠️ No se pudieron cargar los permisos:',
-      error.message
-    )
-
-    allowedUsers = new Map()
-
-    allowedUsers.set(
-      OWNER.toLowerCase(),
-      OWNER
-    )
-  }
+function log(message) {
+  console.log(`[${new Date().toLocaleTimeString()}] ${message}`)
 }
 
-function savePermissions() {
-  try {
-    const names = Array.from(
-      allowedUsers.values()
-    )
-
-    fs.writeFileSync(
-      PERMISSIONS_FILE,
-      JSON.stringify(names, null, 2),
-      'utf8'
-    )
-
-  } catch (error) {
-    console.log(
-      '⚠️ No se pudieron guardar los permisos:',
-      error.message
-    )
-  }
+function normalize(text) {
+  return String(text || '').toLowerCase()
 }
 
 function isOwner(username) {
-  return (
-    typeof username === 'string' &&
-    username.toLowerCase() === OWNER.toLowerCase()
+  return normalize(username) === CONFIG.owner
+}
+
+function distanceTo(entity) {
+  if (!bot?.entity?.position || !entity?.position) return Infinity
+  return bot.entity.position.distanceTo(entity.position)
+}
+
+function isMob(entity) {
+  return entity && entity.type === 'mob'
+}
+
+function stopAll(reason = 'Detenido.') {
+  taskId++
+  mode = 'quieto'
+
+  if (bot?.pathfinder) {
+    bot.pathfinder.setGoal(null)
+  }
+
+  if (bot) {
+    bot.clearControlStates()
+  }
+
+  log(reason)
+}
+
+function say(message) {
+  if (bot && bot.player) bot.chat(message)
+}
+
+function ownerEntity() {
+  return bot.players[CONFIG.owner]?.entity || null
+}
+
+function playerEntity(name) {
+  return bot.players[normalize(name)]?.entity || null
+}
+
+function nearestHostile(range = 16, around = bot?.entity) {
+  if (!bot || !around?.position) return null
+
+  return bot.nearestEntity(entity =>
+    isMob(entity) &&
+    entity.position &&
+    around.position.distanceTo(entity.position) <= range
   )
 }
 
-function hasPermission(username) {
-  if (isOwner(username)) {
-    return true
-  }
+async function followPlayer(name) {
+  const currentTask = ++taskId
+  mode = `siguiendo a ${name}`
 
-  return allowedUsers.has(
-    username.toLowerCase()
-  )
-}
+  say(`Siguiendo a ${name}. Usa !parar para detenerme.`)
 
-function addPermission(username) {
-  if (!username) {
-    return false
-  }
+  while (taskId === currentTask && bot?.player) {
+    const target = playerEntity(name)
 
-  const cleanName = username.trim()
+    if (!target) {
+      say(`No veo a ${name}.`)
+      break
+    }
 
-  if (!cleanName) {
-    return false
-  }
-
-  allowedUsers.set(
-    cleanName.toLowerCase(),
-    cleanName
-  )
-
-  savePermissions()
-
-  return true
-}
-
-function removePermission(username) {
-  if (!username) {
-    return false
-  }
-
-  if (isOwner(username)) {
-    return false
-  }
-
-  const removed = allowedUsers.delete(
-    username.toLowerCase()
-  )
-
-  savePermissions()
-
-  return removed
-}
-
-// =====================================================
-// FRASES
-// =====================================================
-
-const bromas = [
-  'ha sido elegido por el destino... para picar piedra durante 6 horas. 💀',
-  'acaba de perder el privilegio de tener suerte.',
-  'el comité de Minecraft informa que es sospechoso. 👀',
-  'ha sido acusado de robarle comida a los aldeanos. 🧑‍🌾',
-  'está bajo investigación de la patrulla de pollos. 🐔',
-  'debe 37 diamantes al banco de Minecraft. 💎',
-  'fue visto intentando domesticar un creeper. 😭',
-  'ha sido elegido presidente de los aldeanos.',
-  'ha sido declarado enemigo de los cubos de tierra.',
-  'su inventario contiene 3 piedras y cero posibilidades.',
-  'intentó negociar con un creeper y perdió.',
-  'los aldeanos están discutiendo sobre su caso.',
-  'el Consejo de Minecraft tiene preguntas para él.',
-  'ha mirado demasiado tiempo a un Enderman.',
-  'su nivel de sospecha acaba de subir al 100%.'
-]
-
-const sustos = [
-  '⚠️ ALERTA: algo está detrás tuyo...',
-  '👁️ TE ESTÁN OBSERVANDO',
-  '💀 NO MIRES ATRÁS',
-  '🚨 SISTEMA DE SEGURIDAD ACTIVADO',
-  '👻 ¿Escuchaste eso?',
-  '😈 Creo que alguien te está siguiendo...',
-  '⚠️ ERROR: jugador demasiado confiado',
-  '💀 LA PATATA TE ENCONTRÓ',
-  '👁️ No estás solo...',
-  '⚠️ ALGO SE MOVIÓ EN LA OSCURIDAD',
-  '💀 NO ERA PARTE DEL PLAN',
-  '👁️ ¿Por qué miraste hacia atrás?',
-  '🚨 SE DETECTÓ UNA PRESENCIA EXTRAÑA',
-  '⚠️ DEMASIADO TARDE PARA ESCAPAR'
-]
-
-const saludosNico = [
-  '📖 La historia continúa... y Nico acaba de entrar en escena.',
-  '⚔️ ¡Nico ha llegado! Una nueva aventura está a punto de comenzar.',
-  '👑 ¡El destino ha llamado a Nico una vez más!',
-  '🔥 ¡Nico está aquí! Ahora sí podemos empezar la aventura.',
-  '💎 ¡El héroe de esta historia ha llegado: Nico!',
-  '🗿 Nico apareció. Algo me dice que esto va a terminar mal.',
-  '🌟 ¡Nico ha entrado al mundo! La aventura puede continuar.',
-  '⚔️ Reúnan al equipo. Nico acaba de llegar.',
-  '📖 Un nuevo capítulo comienza con la llegada de Nico.',
-  '🏆 ¡Nico está aquí! El mundo necesitaba un héroe.',
-  '🌌 El destino nos trajo hasta este momento. Bienvenido, Nico.',
-  '🔥 La aventura se pone interesante. Nico está en el server.',
-  '👁️ Algo grande está por suceder... Nico acaba de llegar.',
-  '💀 Nico ha llegado. Esperemos que esta vez tenga un plan.',
-  '🧭 El camino está marcado. Nico, la aventura te espera.',
-  '⚡ ¡Nico se ha unido a la aventura!',
-  '🏰 Los héroes se reúnen. Nico está presente.',
-  '📜 La historia acaba de cambiar con la llegada de Nico.',
-  '🌟 Bienvenido, Nico. Tu próxima aventura comienza ahora.',
-  '🎮 Nico está aquí. Que comience el caos.'
-]
-
-const saludosOtros = [
-  '¡Hola! 👋',
-  '¡Buenas! 😎',
-  '¡Bienvenido al server!',
-  '¡Miren quién apareció! 👀',
-  '¡Llegó la leyenda!',
-  '¡Alguien acaba de entrar! 🗿',
-  '¡Bienvenido, aventurero!'
-]
-
-const monedas = [
-  '🪙 Salió CARA',
-  '🪙 Salió CRUZ',
-  '🪙 La moneda cayó de canto 💀',
-  '🪙 La moneda decidió no colaborar 😭'
-]
-
-const dados = [
-  '🎲 Sacaste un 1. F.',
-  '🎲 Sacaste un 2.',
-  '🎲 Sacaste un 3.',
-  '🎲 Sacaste un 4.',
-  '🎲 Sacaste un 5. Casi perfecto.',
-  '🎲 ¡Sacaste un 6! 🎉'
-]
-
-const storyFrases = [
-  '📖 La aventura acaba de comenzar.',
-  '⚔️ Algo antiguo ha despertado.',
-  '🌎 El destino de este mundo está en nuestras manos.',
-  '🔥 No hay vuelta atrás. Tenemos que seguir adelante.',
-  '👁️ Esto es mucho más grande de lo que imaginábamos.',
-  '🧭 Necesitamos un plan. Y rápido.',
-  '📜 La historia todavía no ha terminado.',
-  '🌟 Hoy comienza una nueva leyenda.',
-  '⚔️ No importa lo que haya delante. Seguimos.',
-  '🏆 El mundo necesita héroes.',
-  '💀 Esto no estaba en nuestros planes...',
-  '🔥 Tenemos una última oportunidad.',
-  '👀 Algo me dice que esto va a salir mal.',
-  '🛡️ Reúnan al equipo. Tenemos trabajo que hacer.',
-  '🌌 El destino nos trajo hasta aquí por alguna razón.',
-  '⚔️ Prepárense. La aventura continúa.',
-  '🧭 No sé qué hay al otro lado, pero vamos a descubrirlo.',
-  '🏰 Esta podría ser nuestra mayor aventura.',
-  '🤝 Tenemos que confiar en nuestros amigos.',
-  '💀 Bueno... esto definitivamente no estaba previsto.'
-]
-
-// =====================================================
-// UTILIDADES
-// =====================================================
-
-function random(array) {
-  if (!Array.isArray(array) || array.length === 0) {
-    return ''
-  }
-
-  return array[
-    Math.floor(Math.random() * array.length)
-  ]
-}
-
-function sleep(ms) {
-  return new Promise(resolve => {
-    setTimeout(resolve, ms)
-  })
-}
-
-function sendChat(message) {
-  if (!bot || !bot.chat) {
-    console.log('[CHAT BLOQUEADO]', message)
-    return false
-  }
-
-  try {
-    bot.chat(String(message).slice(0, 250))
-    return true
-  } catch (error) {
-    console.log(
-      '❌ Error enviando mensaje:',
-      error.message
+    bot.pathfinder.setGoal(
+      new GoalNear(
+        Math.floor(target.position.x),
+        Math.floor(target.position.y),
+        Math.floor(target.position.z),
+        2
+      )
     )
-    return false
+
+    await sleep(1000)
   }
+
+  if (taskId === currentTask) stopAll()
 }
 
-function findPlayerName(name) {
-  if (!bot || !bot.players || !name) {
-    return null
-  }
+async function protectOwner() {
+  const currentTask = ++taskId
+  mode = `protegiendo a ${CONFIG.owner}`
 
-  const lower = name.toLowerCase()
+  say(`Protegiendo a ${CONFIG.owner}.`)
 
-  return Object.keys(bot.players).find(
-    player =>
-      player.toLowerCase() === lower
-  ) || null
-}
+  while (taskId === currentTask && bot?.player) {
+    const owner = ownerEntity()
 
-function getPlayerEntity(name) {
-  const realName = findPlayerName(name)
+    if (!owner) {
+      say(`No veo a ${CONFIG.owner}; espero a que se acerque.`)
+      bot.pathfinder.setGoal(null)
+      await sleep(1500)
+      continue
+    }
 
-  if (!realName) {
-    return null
-  }
+    const enemy = nearestHostile(12, owner)
 
-  return bot.players[realName]?.entity || null
-}
+    if (enemy) {
+      const distance = distanceTo(enemy)
 
-function commandAllowed(player) {
-  if (!hasPermission(player)) {
-    console.log(
-      `🚫 Comando rechazado: ${player}`
-    )
-    return false
-  }
-
-  const now = Date.now()
-
-  if (
-    now - lastCommandTime <
-    COMMAND_COOLDOWN
-  ) {
-    return false
-  }
-
-  lastCommandTime = now
-
-  return true
-}
-
-// =====================================================
-// CREAR BOT
-// =====================================================
-
-function createBot() {
-  if (manualStop) {
-    return
-  }
-
-  if (!HOST) {
-    console.error(
-      '❌ Falta la variable MC_HOST.'
-    )
-    return
-  }
-
-  if (
-    !Number.isInteger(PORT) ||
-    PORT < 1 ||
-    PORT > 65535
-  ) {
-    console.error(
-      '❌ MC_PORT no es válido.'
-    )
-    return
-  }
-
-  console.log('')
-  console.log('====================================')
-  console.log('🤖 INICIANDO BOT')
-  console.log(`🌐 HOST: ${HOST}`)
-  console.log(`🔌 PORT: ${PORT}`)
-  console.log(`👑 OWNER: ${OWNER}`)
-  console.log('====================================')
-  console.log('')
-
-  bot = mineflayer.createBot({
-    host: HOST,
-    port: PORT,
-    username: BOT_USERNAME,
-    auth: 'offline'
-  })
-const BOT_PASSWORD = process.env.BOT_PASSWORD
-
-// ...
-
-bot.on('messagestr', (message) => {
-  const msg = message.toLowerCase()
-
-  if (
-    BOT_PASSWORD &&
-    (
-      msg.includes('/login') ||
-      msg.includes('please login') ||
-      msg.includes('inicia sesión') ||
-      msg.includes('inicie sesión') ||
-      msg.includes('contraseña')
-    )
-  ) {
-    console.log('🔐 Servidor solicita autenticación.')
-
-    setTimeout(() => {
-      try {
-        bot.chat(`/login ${BOT_PASSWORD}`)
-        console.log('🔐 Comando de login enviado.')
-      } catch (error) {
-        console.log(
-          '❌ Error enviando login:',
-          error.message
+      if (distance > 3.2) {
+        bot.pathfinder.setGoal(
+          new GoalNear(
+            Math.floor(enemy.position.x),
+            Math.floor(enemy.position.y),
+            Math.floor(enemy.position.z),
+            2
+          )
         )
+      } else {
+        bot.pathfinder.setGoal(null)
+        try {
+          await bot.lookAt(enemy.position.offset(0, enemy.height || 1, 0), true)
+          bot.attack(enemy)
+        } catch (_) {}
       }
-    }, 1500)
+    } else {
+      bot.pathfinder.setGoal(
+        new GoalNear(
+          Math.floor(owner.position.x),
+          Math.floor(owner.position.y),
+          Math.floor(owner.position.z),
+          3
+        )
+      )
+    }
+
+    await sleep(650)
   }
-})
-  bot.loadPlugin(pathfinder)
 
-  // ===================================================
-  // SPAWN
-  // ===================================================
+  if (taskId === currentTask) stopAll()
+}
 
-  bot.once('spawn', () => {
-    console.log('')
-    console.log(
-      '✅ BOT CONECTADO CORRECTAMENTE'
-    )
-    console.log('')
+async function attackTarget(target, seconds, label) {
+  const currentTask = ++taskId
+  const endAt = Date.now() + seconds * 1000
+  mode = `combatiendo ${label}`
+
+  say(`Combatiendo ${label} durante ${seconds} segundos.`)
+
+  while (taskId === currentTask && bot?.player && Date.now() < endAt) {
+    if (!target?.isValid) break
+
+    const distance = distanceTo(target)
+
+    if (distance > 3.2) {
+      bot.pathfinder.setGoal(
+        new GoalNear(
+          Math.floor(target.position.x),
+          Math.floor(target.position.y),
+          Math.floor(target.position.z),
+          2
+        )
+      )
+    } else {
+      bot.pathfinder.setGoal(null)
+
+      try {
+        await bot.lookAt(target.position.offset(0, target.height || 1, 0), true)
+        bot.attack(target)
+      } catch (_) {}
+    }
+
+    await sleep(650)
+  }
+
+  if (taskId === currentTask) {
+    say('Combate terminado.')
+    stopAll()
+  }
+}
+
+function getBlockIds(material) {
+  const aliases = {
+    diamante: ['diamond_ore', 'deepslate_diamond_ore'],
+    diamond: ['diamond_ore', 'deepslate_diamond_ore'],
+    hierro: ['iron_ore', 'deepslate_iron_ore'],
+    iron: ['iron_ore', 'deepslate_iron_ore'],
+    oro: ['gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'],
+    gold: ['gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'],
+    carbon: ['coal_ore', 'deepslate_coal_ore'],
+    coal: ['coal_ore', 'deepslate_coal_ore'],
+    redstone: ['redstone_ore', 'deepslate_redstone_ore'],
+    lapislazuli: ['lapis_ore', 'deepslate_lapis_ore'],
+    lapis: ['lapis_ore', 'deepslate_lapis_ore'],
+    esmeralda: ['emerald_ore', 'deepslate_emerald_ore'],
+    emerald: ['emerald_ore', 'deepslate_emerald_ore']
+  }
+
+  const names = aliases[normalize(material)]
+  if (!names) return []
+
+  return names
+    .map(name => bot.registry.blocksByName[name]?.id)
+    .filter(id => id !== undefined)
+}
+
+async function mine(material, amount) {
+  const ids = getBlockIds(material)
+
+  if (ids.length === 0) {
+    say('Material no válido. Ejemplo: !minar diamante 5')
+    return
+  }
+
+  const currentTask = ++taskId
+  const targetAmount = Math.max(1, Math.min(Number(amount) || 1, 64))
+  let mined = 0
+  mode = `minando ${material}`
+
+  say(`Buscando ${targetAmount} bloque(s) de ${material}.`)
+
+  while (taskId === currentTask && mined < targetAmount && bot?.player) {
+    const block = bot.findBlock({
+      matching: ids,
+      maxDistance: 48
+    })
+
+    if (!block) {
+      say(`No encuentro más ${material} cerca.`)
+      break
+    }
 
     try {
-      movements = new Movements(bot)
-
-      // No rompe bloques mientras se mueve.
-      movements.canDig = false
-
-      bot.pathfinder.setMovements(
-        movements
+      await bot.pathfinder.goto(
+        new GoalNear(block.position.x, block.position.y, block.position.z, 1)
       )
-    } catch (error) {
-      console.log(
-        '⚠️ Error configurando movimiento:',
-        error.message
-      )
-    }
 
-    setTimeout(() => {
-      sendChat(
-        '🤖 Bot conectado. Usá !help'
-      )
-    }, 1500)
-  })
+      if (taskId !== currentTask) break
 
-  // ===================================================
-  // CHAT
-  // ===================================================
-
-  bot.on(
-    'chat',
-    async (player, message) => {
-
-      try {
-
-        if (player === BOT_USERNAME) {
-          return
-        }
-
-        if (
-          typeof message !== 'string'
-        ) {
-          return
-        }
-
-        const text = message.trim()
-
-        if (!text.startsWith('!')) {
-          return
-        }
-
-        const args =
-          text.split(/\s+/)
-
-        const command =
-          args[0].toLowerCase()
-
-        console.log(
-          `[COMANDO] ${player}: ${text}`
-        )
-
-        // ==========================================
-        // HELP
-        // ==========================================
-
-        if (command === '!help') {
-
-          sendChat(
-            '🤖 !dado !moneda !say !msg !broma !screamer !saludar !story !online !pos !mirar !seguir !parar'
-          )
-
-          return
-        }
-
-        // ==========================================
-        // DAR PERMISO
-        // ==========================================
-
-        if (
-          command === '!darpermiso'
-        ) {
-
-          if (!isOwner(player)) {
-            sendChat(
-              '❌ Solo nicolas7878 puede dar permisos.'
-            )
-            return
-          }
-
-          if (args.length < 2) {
-            sendChat(
-              'Uso: !darpermiso <jugador>'
-            )
-            return
-          }
-
-          const target = args[1]
-
-          if (isOwner(target)) {
-            sendChat(
-              '👑 Nico ya tiene permisos.'
-            )
-            return
-          }
-
-          addPermission(target)
-
-          sendChat(
-            `✅ ${target} ahora puede usar los comandos.`
-          )
-
-          return
-        }
-
-        // ==========================================
-        // QUITAR PERMISO
-        // ==========================================
-
-        if (
-          command === '!quitarpermiso'
-        ) {
-
-          if (!isOwner(player)) {
-            sendChat(
-              '❌ Solo nicolas7878 puede quitar permisos.'
-            )
-            return
-          }
-
-          if (args.length < 2) {
-            sendChat(
-              'Uso: !quitarpermiso <jugador>'
-            )
-            return
-          }
-
-          const target = args[1]
-
-          if (isOwner(target)) {
-            sendChat(
-              '❌ No podés quitarle los permisos al dueño.'
-            )
-            return
-          }
-
-          const removed =
-            removePermission(target)
-
-          if (removed) {
-            sendChat(
-              `❌ Permisos de ${target} eliminados.`
-            )
-          } else {
-            sendChat(
-              `ℹ️ ${target} no tenía permisos.`
-            )
-          }
-
-          return
-        }
-
-        // ==========================================
-        // LISTA DE PERMISOS
-        // ==========================================
-
-        if (
-          command === '!permisos'
-        ) {
-
-          if (!isOwner(player)) {
-            sendChat(
-              '❌ Solo nicolas7878 puede ver los permisos.'
-            )
-            return
-          }
-
-          const names =
-            Array.from(
-              allowedUsers.values()
-            )
-
-          sendChat(
-            `👑 Autorizados: ${names.join(', ')}`
-          )
-
-          return
-        }
-
-        // ==========================================
-        // RECONEXIÓN
-        // ==========================================
-
-        if (
-          command === '!reconectar'
-        ) {
-
-          if (!isOwner(player)) {
-            sendChat(
-              '❌ Solo Nico puede reconectar el bot.'
-            )
-            return
-          }
-
-          sendChat(
-            '🔄 Reconectando...'
-          )
-
-          setTimeout(() => {
-            try {
-              if (bot) {
-                bot.quit(
-                  'Reconexión solicitada'
-                )
-              }
-            } catch (error) {
-              console.log(
-                'Error reconectando:',
-                error.message
-              )
-            }
-          }, 1000)
-
-          return
-        }
-
-        // ==========================================
-        // PERMISO NORMAL
-        // ==========================================
-
-        if (!commandAllowed(player)) {
-          return
-        }
-
-        // ==========================================
-        // DADO
-        // ==========================================
-
-        if (command === '!dado') {
-          sendChat(random(dados))
-          return
-        }
-
-        // ==========================================
-        // MONEDA
-        // ==========================================
-
-        if (command === '!moneda') {
-          sendChat(random(monedas))
-          return
-        }
-
-        // ==========================================
-        // SAY
-        // ==========================================
-
-        if (command === '!say') {
-
-          if (args.length < 2) {
-            sendChat(
-              'Uso: !say <mensaje>'
-            )
-            return
-          }
-
-          sendChat(
-            args.slice(1).join(' ')
-          )
-
-          return
-        }
-
-        // ==========================================
-        // MSG
-        // ==========================================
-
-        if (command === '!msg') {
-
-          if (args.length < 3) {
-            sendChat(
-              'Uso: !msg <jugador> <mensaje>'
-            )
-            return
-          }
-
-          const target = args[1]
-
-          const privateMessage =
-            args.slice(2).join(' ')
-
-          sendChat(
-            `/msg ${target} ${privateMessage}`
-          )
-
-          return
-        }
-
-        // ==========================================
-        // BROMA
-        // ==========================================
-
-        if (command === '!broma') {
-
-          if (args.length < 2) {
-            sendChat(
-              'Uso: !broma <jugador>'
-            )
-            return
-          }
-
-          const target = args[1]
-
-          sendChat(
-            `😂 ${target} ${random(bromas)}`
-          )
-
-          return
-        }
-
-        // ==========================================
-        // SCREAMER
-        // ==========================================
-
-        if (command === '!screamer') {
-
-          if (args.length < 2) {
-            sendChat(
-              'Uso: !screamer <jugador>'
-            )
-            return
-          }
-
-          const target = args[1]
-
-          if (!findPlayerName(target)) {
-            sendChat(
-              `❌ No encuentro a ${target}.`
-            )
-            return
-          }
-
-          sendChat(
-            `⚠️ ${target}: ${random(sustos)}`
-          )
-
-          await sleep(1200)
-
-          if (!bot) return
-
-          sendChat(
-            `👁️ ${target}...`
-          )
-
-          await sleep(1300)
-
-          if (!bot) return
-
-          sendChat(
-            `💀 ${random(sustos)}`
-          )
-
-          return
-        }
-
-        // ==========================================
-        // SALUDAR
-        // ==========================================
-
-        if (command === '!saludar') {
-
-          if (args.length < 2) {
-            sendChat(
-              'Uso: !saludar <jugador>'
-            )
-            return
-          }
-
-          const target = args[1]
-
-          if (
-            target.toLowerCase() === 'nico'
-          ) {
-            sendChat(
-              random(saludosNico)
-            )
-          } else {
-            sendChat(
-              `${target}: ${random(saludosOtros)}`
-            )
-          }
-
-          return
-        }
-
-        // ==========================================
-        // STORY
-        // ==========================================
-
-        if (command === '!story') {
-          sendChat(
-            random(storyFrases)
-          )
-          return
-        }
-
-        // ==========================================
-        // ONLINE
-        // ==========================================
-
-        if (command === '!online') {
-
-          const players =
-            Object.keys(bot.players || {})
-
-          if (players.length === 0) {
-            sendChat(
-              '👻 No veo jugadores.'
-            )
-          } else {
-            sendChat(
-              `👥 Jugadores: ${players.join(', ')}`
-            )
-          }
-
-          return
-        }
-
-        // ==========================================
-        // POSICIÓN
-        // ==========================================
-
-        if (command === '!pos') {
-
-          if (
-            !bot.entity ||
-            !bot.entity.position
-          ) {
-            sendChat(
-              '❌ Todavía no tengo posición.'
-            )
-            return
-          }
-
-          const p =
-            bot.entity.position
-
-          sendChat(
-            `📍 X:${Math.floor(p.x)} Y:${Math.floor(p.y)} Z:${Math.floor(p.z)}`
-          )
-
-          return
-        }
-
-        // ==========================================
-        // MIRAR
-        // ==========================================
-
-        if (command === '!mirar') {
-
-          if (args.length < 2) {
-            sendChat(
-              'Uso: !mirar <jugador>'
-            )
-            return
-          }
-
-          const target = args[1]
-
-          const entity =
-            getPlayerEntity(target)
-
-          if (!entity) {
-            sendChat(
-              `❌ No encuentro a ${target}.`
-            )
-            return
-          }
-
-          try {
-
-            await bot.lookAt(
-              entity.position.offset(
-                0,
-                1.6,
-                0
-              ),
-              true
-            )
-
-            sendChat(
-              `👁️ Estoy mirando a ${target}.`
-            )
-
-          } catch (error) {
-
-            console.log(
-              'Error mirando:',
-              error.message
-            )
-
-            sendChat(
-              '❌ No pude mirar hacia ese jugador.'
-            )
-          }
-
-          return
-        }
-
-        // ==========================================
-        // SEGUIR
-        // ==========================================
-
-        if (command === '!seguir') {
-
-          if (args.length < 2) {
-            sendChat(
-              'Uso: !seguir <jugador>'
-            )
-            return
-          }
-
-          const target = args[1]
-
-          const entity =
-            getPlayerEntity(target)
-
-          if (!entity) {
-            sendChat(
-              `❌ No encuentro a ${target}.`
-            )
-            return
-          }
-
-          if (!movements) {
-            sendChat(
-              '❌ El movimiento todavía no está listo.'
-            )
-            return
-          }
-
-          try {
-
-            bot.pathfinder.setMovements(
-              movements
-            )
-
-            const p =
-              entity.position
-
-            bot.pathfinder.setGoal(
-              new GoalNear(
-                p.x,
-                p.y,
-                p.z,
-                2
-              ),
-              true
-            )
-
-            sendChat(
-              `👀 Voy hacia ${target}.`
-            )
-
-          } catch (error) {
-
-            console.log(
-              'Error siguiendo:',
-              error.message
-            )
-
-            sendChat(
-              '❌ No pude empezar a seguirlo.'
-            )
-          }
-
-          return
-        }
-
-        // ==========================================
-        // PARAR
-        // ==========================================
-
-        if (command === '!parar') {
-
-          try {
-
-            if (bot.pathfinder) {
-              bot.pathfinder.setGoal(null)
-            }
-
-          } catch (error) {
-
-            console.log(
-              'Error deteniendo movimiento:',
-              error.message
-            )
-          }
-
-          sendChat(
-            '🛑 Me quedo quieto.'
-          )
-
-          return
-        }
-
-        // ==========================================
-        // DESCONOCIDO
-        // ==========================================
-
-        sendChat(
-          `❓ Comando desconocido: ${command}. Usá !help`
-        )
-
-      } catch (error) {
-
-        console.log(
-          '❌ Error procesando comando:',
-          error
-        )
+      const currentBlock = bot.blockAt(block.position)
+      if (currentBlock && ids.includes(currentBlock.type) && bot.canDigBlock(currentBlock)) {
+        await bot.dig(currentBlock)
+        mined++
       }
+    } catch (error) {
+      log(`No pude minar: ${error.message}`)
     }
-  )
 
-  // ===================================================
-  // LOGIN
-  // ===================================================
+    await sleep(300)
+  }
 
-  bot.on('login', () => {
-    console.log('🔐 Login realizado.')
-  })
+  if (taskId === currentTask) {
+    say(`Minería terminada: ${mined}/${targetAmount} bloque(s).`)
+    stopAll()
+  }
+}
 
-  // ===================================================
-  // ERROR
-  // ===================================================
+function inventoryText() {
+  const items = bot.inventory.items()
 
-  bot.on('error', error => {
+  if (items.length === 0) return 'Inventario vacío.'
 
-    console.log('')
-    console.log('❌ ERROR DEL BOT')
-    console.log(
-      error?.message || error
-    )
-    console.log('')
-  })
+  const grouped = new Map()
+  for (const item of items) {
+    grouped.set(item.displayName, (grouped.get(item.displayName) || 0) + item.count)
+  }
 
-  // ===================================================
-  // KICK
-  // ===================================================
+  const text = [...grouped.entries()]
+    .map(([name, count]) => `${name} x${count}`)
+    .join(', ')
 
-  bot.on('kicked', reason => {
+  return text.length > 220 ? `${text.slice(0, 217)}...` : text
+}
 
-    console.log('')
-    console.log('🚫 BOT EXPULSADO')
-    console.log(
-      'Motivo:',
-      reason
-    )
-    console.log('')
-  })
+function statusText() {
+  const health = Math.round(bot.health * 10) / 10
+  const food = Math.round(bot.food)
+  const position = bot.entity.position.floored()
 
-  // ===================================================
-  // DESCONEXIÓN
-  // ===================================================
+  return `Modo: ${mode} | Vida: ${health}/20 | Comida: ${food}/20 | Pos: ${position.x}, ${position.y}, ${position.z}`
+}
 
-  bot.on('end', reason => {
+function showHelp() {
+  say('Comandos: !help, !parar, !proteger, !desproteger, !seguir [jugador], !minar [material] [cantidad], !pelear mobs [segundos], !pelear jugador [segundos], !status, !inventario')
+}
 
-    console.log('')
-    console.log('🔌 BOT DESCONECTADO')
-    console.log(
-      'Motivo:',
-      reason || 'desconocido'
-    )
-    console.log('')
+function handleCommand(username, message) {
+  if (!isOwner(username)) return
 
-    bot = null
-    movements = null
+  const args = message.trim().split(/\s+/)
+  const command = normalize(args.shift())
 
-    if (manualStop) {
+  if (!command.startsWith('!')) return
+
+  if (command === '!help') return showHelp()
+
+  if (command === '!parar') {
+    stopAll()
+    return say('Listo, me detuve.')
+  }
+
+  if (command === '!proteger') {
+    stopAll()
+    protectOwner()
+    return
+  }
+
+  if (command === '!desproteger') {
+    stopAll()
+    return say('Protección desactivada.')
+  }
+
+  if (command === '!seguir') {
+    const targetName = normalize(args[0] || CONFIG.owner)
+    stopAll()
+    followPlayer(targetName)
+    return
+  }
+
+  if (command === '!minar') {
+    const material = args[0]
+    const amount = args[1]
+
+    if (!material) return say('Uso: !minar diamante 5')
+
+    stopAll()
+    mine(material, amount)
+    return
+  }
+
+  if (command === '!pelear') {
+    const type = normalize(args[0])
+    const seconds = Math.max(5, Math.min(Number(args[1]) || 30, 300))
+
+    stopAll()
+
+    if (type === 'mobs' || type === 'mob') {
+      const target = nearestHostile(32)
+      if (!target) return say('No veo mobs cerca.')
+
+      attackTarget(target, seconds, 'mobs')
       return
     }
 
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer)
+    if (type === 'jugador' || type === 'player') {
+      const target = ownerEntity()
+      if (!target) return say(`No veo a ${CONFIG.owner}.`)
+
+      attackTarget(target, seconds, `jugador ${CONFIG.owner}`)
+      return
     }
 
-    console.log(
-      '🔄 Reconectando en 10 segundos...'
-    )
+    return say('Uso: !pelear mobs 60 o !pelear jugador 30')
+  }
 
-    reconnectTimer = setTimeout(() => {
+  if (command === '!status') return say(statusText())
+  if (command === '!inventario' || command === '!inv') return say(inventoryText())
 
-      reconnectTimer = null
+  say('Comando desconocido. Usa !help')
+}
 
-      createBot()
+function sendPluginLoginIfNeeded(message) {
+  if (loginSent || !CONFIG.pluginPassword) return
 
-    }, 10000)
+  const text = normalize(message)
+  const asksForLogin =
+    text.includes('/login') ||
+    text.includes('/l ') ||
+    text.includes('inicia sesión') ||
+    text.includes('inicie sesión') ||
+    text.includes('log in')
+
+  if (asksForLogin) {
+    loginSent = true
+    setTimeout(() => {
+      if (bot?.player) {
+        bot.chat(`/login ${CONFIG.pluginPassword}`)
+        log('Comando /login enviado.')
+      }
+    }, 1500)
+  }
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    connect()
+  }, CONFIG.reconnectMs)
+
+  log(`Reconectando en ${CONFIG.reconnectMs / 1000} segundos...`)
+}
+
+function connect() {
+  loginSent = false
+  stopAll('Iniciando conexión...')
+
+  log(`Conectando a ${CONFIG.host}:${CONFIG.port} como ${CONFIG.username}`)
+
+  bot = mineflayer.createBot({
+    host: CONFIG.host,
+    port: CONFIG.port,
+    username: CONFIG.username,
+    auth: 'offline',
+    version: false
+  })
+
+  bot.loadPlugin(pathfinder)
+
+  bot.once('spawn', () => {
+    movements = new Movements(bot)
+    movements.canDig = true
+    movements.allow1by1towers = false
+    bot.pathfinder.setMovements(movements)
+
+    log('Bot conectado al servidor.')
+    say('Bot conectado. Usa !help, nicolas7878.')
+  })
+
+  bot.on('chat', handleCommand)
+
+  bot.on('messagestr', message => {
+    sendPluginLoginIfNeeded(message)
+  })
+
+  bot.on('kicked', reason => {
+    log(`Expulsado: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`)
+  })
+
+  bot.on('error', error => {
+    log(`Error: ${error.message}`)
+  })
+
+  bot.on('end', () => {
+    log('Conexión terminada.')
+    scheduleReconnect()
   })
 }
 
-// =====================================================
-// INICIO
-// =====================================================
+process.on('SIGINT', () => {
+  log('Cerrando bot...')
+  if (reconnectTimer) clearTimeout(reconnectTimer)
+  if (bot) bot.quit('Bot apagado')
+  process.exit(0)
+})
 
-loadPermissions()
-
-if (!HOST) {
-
-  console.error('')
-  console.error(
-    '❌ MC_HOST no está configurado.'
-  )
-  console.error('')
-  console.error(
-    'Configurá MC_HOST y MC_PORT en las variables de entorno.'
-  )
-  console.error('')
-
-} else {
-
-  createBot()
+if (!CONFIG.pluginPassword) {
+  log('Aviso: BOT_PASSWORD está vacío. El bot no podrá ejecutar /login.')
 }
 
-// =====================================================
-// CIERRE SEGURO
-// =====================================================
-
-function shutdown(signal) {
-
-  console.log(
-    `\n🛑 Recibido ${signal}. Cerrando...`
-  )
-
-  manualStop = true
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
-  }
-
-  try {
-
-    if (bot) {
-      bot.quit(
-        'Bot apagado'
-      )
-    }
-
-  } catch (error) {
-
-    console.log(
-      'Error cerrando:',
-      error.message
-    )
-  }
-
-  setTimeout(() => {
-    process.exit(0)
-  }, 1000)
-}
-
-process.on(
-  'SIGINT',
-  () => shutdown('SIGINT')
-)
-
-process.on(
-  'SIGTERM',
-  () => shutdown('SIGTERM')
-)
+connect()
