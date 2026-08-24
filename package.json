@@ -1,12 +1,17 @@
 {
-  "name": "botpromaxdenico",
+  "name": "botpromax-minecraft",
   "version": "1.0.0",
-  "main": "index.js",
+  "private": true,
+  "description": "Bot Mineflayer para Aternos Minecraft 1.21",
+  "main": "bot.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node bot.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
-    "mineflayer": "^4.37.1",
+    "mineflayer": "^4.33.0",
     "mineflayer-pathfinder": "^2.4.5"
   }
 }
