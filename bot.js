@@ -1,5 +1,6 @@
 'use strict'
 
+const http = require('http')
 const mineflayer = require('mineflayer')
 const {
   pathfinder,
@@ -7,6 +8,14 @@ const {
   goals: { GoalNear }
 } = require('mineflayer-pathfinder')
 
+const WEB_PORT = Number(process.env.PORT || 10000)
+
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+  res.end('Bot de Minecraft activo.')
+}).listen(WEB_PORT, '0.0.0.0', () => {
+  console.log(`Servidor web activo en puerto ${WEB_PORT}`)
+})
 // Configuración: puedes cambiar estos valores desde variables de entorno.
 const CONFIG = {
   host: process.env.MC_HOST || 'trolos1.aternos.me',
