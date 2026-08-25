@@ -15,7 +15,7 @@ const {
 
 const CONFIG = {
   host: process.env.MC_HOST || 'trolos1.aternos.me',
-  port: Number(process.env.MC_PORT || 24474),
+  port: Number(process.env.MC_PORT || 25565),
   username: process.env.BOT_USERNAME || 'botpromax',
   // BOT_PASSWORD tiene prioridad. El valor de respaldo sirve si Render no la carga.
   pluginPassword: process.env.BOT_PASSWORD || '123456',
